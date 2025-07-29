@@ -1,0 +1,79 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = 'currency-gateway'
+        DOCKERFILE_PATH = 'src/CurrencyGateway.Web/Dockerfile'
+        APP_PORT = '80'
+        HOST_PORT = '8083'
+    }
+
+    stages {
+        stage('Checkout Source') {
+            steps {
+                checkout scm
+                echo 'Код успешно загружен из репозитория'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "Старт сборки Docker образа: ${IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    dockerImage = docker.build("${IMAGE_NAME}:${env.BUILD_NUMBER}", "-f ${DOCKERFILE_PATH} .")
+                }
+            }
+        }
+
+        stage('Test Container') {
+            steps {
+                script {
+                    echo "Запуск тестового контейнера из образа ${IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    def output = bat(
+                        script: """docker run -d -p %HOST_PORT%:%APP_PORT% ${IMAGE_NAME}:${env.BUILD_NUMBER}""",
+                        returnStdout: true
+                    ).trim()
+                    def containerId = output.split('\n')[-1]
+
+                    try {
+                        echo "Ждем 60 секунд пока контейнер поднимается"
+                        sleep(60)
+                        echo "Проверка состояния контейнера по адресу http://localhost:${HOST_PORT}/health"
+                        bat "curl -f --retry 3 --retry-delay 5 http://localhost:${HOST_PORT}/health"
+                        echo 'Контейнер прошел проверку здоровья'
+                    }
+                    catch (Exception ex) {
+                        echo "Health check не пройден: ${ex.message}"
+                        error("Проверка здоровья контейнера не удалась")
+                    }
+                    finally {
+                        echo "Остановка и удаление тестового контейнера"
+                        bat "docker stop ${containerId} || exit 0"
+                        bat "docker rm ${containerId} || exit 0"
+                    }
+                }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                script {
+                    echo "Удаление локального Docker образа ${IMAGE_NAME}:${env.BUILD_NUMBER}"
+                    bat "docker rmi ${IMAGE_NAME}:${env.BUILD_NUMBER} || exit 0"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline успешно завершен!'
+        }
+        failure {
+            echo 'Pipeline завершился с ошибкой'
+        }
+        always {
+            echo 'Завершение pipeline (always)'
+        }
+    }
+}
